@@ -71,7 +71,7 @@ func cloneAndMergeAttrs(attributes map[string]any, groups []string, as []slog.At
 	existing, _ := attributes[groups[0]].(map[string]any) // nolint:revive
 	inner := cloneAndMergeAttrs(existing, groups[1:], as)
 	if len(inner) == 0 {
-		return attributes
+		return maps.Clone(attributes) // callers may modify the result
 	}
 
 	m := maps.Clone(attributes)
@@ -83,13 +83,11 @@ func cloneAndMergeAttrs(attributes map[string]any, groups []string, as []slog.At
 	return m
 }
 
-// mergeAttrs is cloneAndMergeAttrs for the handler's current groups. The timestamp key is
-// reserved for the handler's own timestamp field.
+// mergeAttrs is cloneAndMergeAttrs for the handler's current groups. The top-level timestamp key,
+// whether an attribute or a group, is reserved for the handler's own timestamp field.
 func (h *SLogHandler) mergeAttrs(as []slog.Attr) map[string]any {
 	attributes := cloneAndMergeAttrs(h.attributes, h.groups, as)
-	if len(h.groups) == 0 {
-		delete(attributes, zerolog.TimestampFieldName)
-	}
+	delete(attributes, zerolog.TimestampFieldName)
 
 	return attributes
 }

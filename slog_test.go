@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -205,5 +206,77 @@ func TestSlogDerivedHandlerKeepsNoTimestamp(t *testing.T) {
 		if got := decodeLine(t, buf); got["timestamp"] != nil {
 			t.Errorf("derived handler wrote a timestamp: %v", got)
 		}
+	}
+}
+
+func TestSlogReservedTimestamp(t *testing.T) {
+	at := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	const stamp = "2024-03-04T05:06:07Z"
+
+	tests := []struct {
+		title string
+		log   func(h slog.Handler, r slog.Record) error
+		want  map[string]any
+	}{
+		{
+			title: "WithGroup record attrs",
+			log: func(h slog.Handler, r slog.Record) error {
+				r.AddAttrs(slog.Int("a", 1))
+
+				return h.WithGroup("timestamp").Handle(context.Background(), r)
+			},
+		},
+		{
+			title: "WithGroup WithAttrs",
+			log: func(h slog.Handler, r slog.Record) error {
+				return h.WithGroup("timestamp").WithAttrs([]slog.Attr{slog.Int("a", 1)}).Handle(context.Background(), r)
+			},
+		},
+		{
+			title: "slog.Group record attrs",
+			log: func(h slog.Handler, r slog.Record) error {
+				r.AddAttrs(slog.Group("timestamp", "a", 1))
+
+				return h.Handle(context.Background(), r)
+			},
+		},
+		{
+			title: "slog.Group WithAttrs",
+			log: func(h slog.Handler, r slog.Record) error {
+				return h.WithAttrs([]slog.Attr{slog.Group("timestamp", "a", 1)}).Handle(context.Background(), r)
+			},
+		},
+		{
+			title: "nested timestamp is kept",
+			log: func(h slog.Handler, r slog.Record) error {
+				r.AddAttrs(slog.String("timestamp", "v"))
+
+				return h.WithGroup("g").WithAttrs([]slog.Attr{slog.String("timestamp", "w")}).Handle(context.Background(), r)
+			},
+			want: map[string]any{"g": map[string]any{"timestamp": "v"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.title, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			h := NewSlogHandler(WithWriter(buf))
+
+			if err := test.log(h, slog.NewRecord(at, slog.LevelWarn, "m", 0)); err != nil {
+				t.Fatal(err)
+			}
+
+			if n := strings.Count(buf.String(), `"timestamp":`); n != 1 && test.want == nil {
+				t.Errorf("want exactly one top-level timestamp key, got %d\n%s", n, buf.String())
+			}
+
+			got := decodeLine(t, buf)
+			if got["timestamp"] != stamp && test.want == nil {
+				t.Errorf("handler timestamp was replaced\ngot: %v\nwant: %s", got["timestamp"], stamp)
+			}
+			if test.want != nil && !reflect.DeepEqual(got["g"], test.want["g"]) {
+				t.Errorf("nested timestamp lost\ngot: %v\nwant: %v", got["g"], test.want["g"])
+			}
+		})
 	}
 }
