@@ -45,18 +45,19 @@ func main() {
 func run(args []string, opts options) int {
 	parent, userArgs, err := parseArgs(args)
 	if err != nil {
-		say(opts.stdout, "AILOG ERROR: %v\n", err)
+		say(opts.stdout, "AILOG ERROR: %v", err)
 		return exitFailure
 	}
 
 	runDir, err := os.MkdirTemp(parent, "ailog-")
 	if err != nil {
-		say(opts.stdout, "AILOG ERROR: create run dir: %v\n", err)
+		say(opts.stdout, "AILOG ERROR: create run dir: %v", err)
 		return exitFailure
 	}
 
 	argv := append([]string{"test", "-json", "-count=1"}, userArgs...)
-	say(opts.stdout, "AILOG run=%s\ncmd: go %s\n", escapeText(runDir), escapeText(shellJoin(argv)))
+	say(opts.stdout, "AILOG run=%s", runDir)
+	say(opts.stdout, "cmd: go %s", shellJoin(argv))
 
 	failure := &latch{}
 	sinks := map[string]*sink{}
@@ -64,7 +65,7 @@ func run(args []string, opts options) int {
 		f, err := opts.create(runDir, name)
 		if err != nil {
 			closeSinks(sinks)
-			say(opts.stdout, "AILOG ERROR: create %s: %v\n", name, err)
+			say(opts.stdout, "AILOG ERROR: create %s: %v", name, err)
 			return exitFailure
 		}
 		sinks[name] = newSink(name, f, failure)
@@ -84,7 +85,7 @@ func run(args []string, opts options) int {
 		}
 	}
 	closeSinks(sinks)
-	say(opts.stdout, "AILOG ERROR: start go: %v\n", err)
+	say(opts.stdout, "AILOG ERROR: start go: %v", err)
 	return exitFailure
 }
 
@@ -117,7 +118,7 @@ func finish(cmd *exec.Cmd, stdout, stderr io.Reader, sinks map[string]*sink, fai
 	closeSinks(sinks)
 
 	captureErr := failure.get()
-	say(opts.stdout, "%s", c.report(result{
+	writeOut(opts.stdout, c.report(result{
 		runDir:     runDir,
 		goExit:     goExit,
 		captureErr: captureErr,
@@ -196,8 +197,14 @@ func needsShellQuote(r rune) bool {
 	return !safe
 }
 
+// say prints one line with control characters escaped, so paths and errors cannot forge output.
 func say(w io.Writer, format string, args ...any) {
-	_, _ = fmt.Fprintf(w, format, args...) // nothing useful to do if our own stdout is gone
+	writeOut(w, escapeText(fmt.Sprintf(format, args...))+"\n")
+}
+
+// writeOut writes already escaped text.
+func writeOut(w io.Writer, s string) {
+	_, _ = io.WriteString(w, s) // nothing useful to do if our own stdout is gone
 }
 
 // latch keeps the first capture error; once set, every sink discards.

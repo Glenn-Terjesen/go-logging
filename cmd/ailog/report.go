@@ -9,12 +9,11 @@ import (
 
 const maxDiagLines = 60
 
-// Diagnostic line priorities: the 60-line budget goes to core lines first, then
-// headers, then details; lines are still printed in section order.
+// Diagnostic line priorities: the 60-line budget goes to essential lines first, then
+// to details, each in print order; kept lines are printed in section order.
 const (
-	tierCore   = iota // BUILD FAIL and FAIL headers, crash headlines, incomplete tests
-	tierHeader        // CANDIDATES headers with their first candidate
-	tierDetail        // everything else
+	tierEssential = iota // BUILD FAIL and FAIL headers, CANDIDATES headers with their first candidate, crash headlines, incomplete tests
+	tierDetail           // everything else
 )
 
 type result struct {
@@ -46,7 +45,7 @@ func (d *diag) add(tier int, format string, args ...any) *diagLine {
 func (d *diag) lines() []string {
 	keep := make([]bool, len(d.items))
 	budget := maxDiagLines
-	for tier := tierCore; tier <= tierDetail; tier++ {
+	for tier := tierEssential; tier <= tierDetail; tier++ {
 		for i, item := range d.items {
 			if item.tier == tier && budget > 0 {
 				keep[i] = true
@@ -128,14 +127,14 @@ func (c *capture) diagnostics(d *diag, res result) {
 	}
 
 	for _, path := range c.builds {
-		d.add(tierCore, "BUILD FAIL %s", path)
+		d.add(tierEssential, "BUILD FAIL %s", path)
 		for _, line := range c.buildLines[path] {
 			d.add(tierDetail, "  %s", line)
 		}
 	}
 
 	for _, b := range c.failBlocks {
-		d.add(tierCore, "FAIL %s %s (#%d..#%d)", b.pkg, b.name, b.first, b.last)
+		d.add(tierEssential, "FAIL %s %s (#%d..#%d)", b.pkg, b.name, b.first, b.last)
 		if b.dropped > 0 {
 			d.add(tierDetail, "  (+%d earlier lines, see full.log)", b.dropped)
 		}
@@ -147,28 +146,28 @@ func (c *capture) diagnostics(d *diag, res result) {
 		}
 	}
 	if c.moreFailed > 0 {
-		d.add(tierCore, "... %d more failed tests not shown (grep -e '--- FAIL' full.log)", c.moreFailed)
+		d.add(tierDetail, "... %d more failed tests not shown (grep -e '--- FAIL' full.log)", c.moreFailed)
 	}
 
 	for _, p := range c.failing {
-		d.add(tierHeader, "CANDIDATES %s (test hints are uncertain; includes passing tests)", p.name)
+		d.add(tierEssential, "CANDIDATES %s (test hints are uncertain; includes passing tests)", p.name)
 		for i, cd := range p.cands {
 			tier := tierDetail
 			if i == 0 {
-				tier = tierHeader
+				tier = tierEssential
 			}
 			line := d.add(tier, "  #%d total=%d %s", cd.id, cd.total, cd.text)
 			line.ref = cd.id
 			line.short = clip(escapeText(fmt.Sprintf("  #%d total=%d ?%s (shown above)", cd.id, cd.total, cd.hint)), maxSummaryLine)
 		}
 		if len(p.cands) == 0 {
-			d.add(tierHeader, "  (no WRN/ERR/FTL/PNC events)")
+			d.add(tierDetail, "  (no WRN/ERR/FTL/PNC events)")
 		}
 		if p.otherWarns > 0 {
 			d.add(tierDetail, "  ... %d more WRN/ERR/FTL/PNC events in compact.log", p.otherWarns)
 		}
 		if p.crashed || len(p.incomplete) > 0 {
-			d.add(tierCore, "CRASH %s headline: %s", p.name, cmp.Or(p.headline, p.lastLine, "(none)"))
+			d.add(tierEssential, "CRASH %s headline: %s", p.name, cmp.Or(p.headline, p.lastLine, "(none)"))
 			for _, line := range p.tail {
 				d.add(tierDetail, "  %s", line)
 			}
@@ -177,7 +176,7 @@ func (c *capture) diagnostics(d *diag, res result) {
 
 	for _, p := range c.failing {
 		for _, name := range p.incomplete {
-			d.add(tierCore, "incomplete: %s %s", p.name, name)
+			d.add(tierEssential, "incomplete: %s %s", p.name, name)
 		}
 	}
 }

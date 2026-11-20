@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -399,5 +400,55 @@ func TestCandidatesBoundedAndShownAbove(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, summary)
 		}
+	}
+}
+
+// Exactly 60 essential lines: 1 BUILD FAIL + 5 FAIL headers + 27 × (CANDIDATES header + first candidate).
+func TestEssentialsExactFit(t *testing.T) {
+	imp := "ex/bad [ex/bad.test]"
+	buildFail, _ := json.Marshal(event{Action: "build-fail", ImportPath: imp})
+	pkgFail, _ := json.Marshal(event{Action: "fail", Package: "ex/bad", FailedBuild: imp})
+	var b strings.Builder
+	b.WriteString(string(buildFail) + "\n" + string(pkgFail) + "\n")
+	for p := range 27 {
+		pkg := fmt.Sprintf("pkg%02d", p)
+		b.WriteString(ev("run", pkg, "TestX", ""))
+		b.WriteString(ev("output", pkg, "TestX", warn(fmt.Sprint("CAUSE-", p))))
+		b.WriteString(ev("fail", pkg, "TestX", "") + ev("fail", pkg, "", ""))
+	}
+	tc := newTestCapture(t, "")
+	summary := tc.feed(t, b.String())
+	if n := strings.Count(summary, "\n  #"); n != 27 {
+		t.Errorf("%d first candidates printed, want 27", n)
+	}
+	for _, want := range []string{"BUILD FAIL " + imp + "\n", "FAIL pkg04 TestX", `msg="CAUSE-0"`, `msg="CAUSE-26"`} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary lacks %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestEssentialsWithEmptyCandidatePools(t *testing.T) {
+	var b strings.Builder
+	for p := range 30 {
+		pkg := fmt.Sprintf("pkg%02d", p)
+		b.WriteString(ev("run", pkg, "TestX", "") + ev("fail", pkg, "TestX", "") + ev("fail", pkg, "", ""))
+	}
+	tc := newTestCapture(t, "")
+	summary := tc.feed(t, b.String())
+	if n := strings.Count(summary, "\nCANDIDATES "); n != 30 {
+		t.Errorf("%d CANDIDATES headers printed, want 30:\n%s", n, summary)
+	}
+}
+
+func TestStartupErrorIsEscaped(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "missing\x1b[2J\r\nRESULT go_exit=0\n", "x")
+	var out bytes.Buffer
+	code := run([]string{"-ailog.out=" + parent, "./..."}, options{stdout: &out, create: createFile})
+	if code != exitFailure || !strings.Contains(out.String(), "AILOG ERROR: create run dir: ") {
+		t.Errorf("exit %d:\n%s", code, out.String())
+	}
+	if strings.ContainsAny(out.String(), "\x1b\r") || slices.Contains(lines(out.String()), "RESULT go_exit=0") {
+		t.Errorf("unescaped error output: %q", out.String())
 	}
 }
