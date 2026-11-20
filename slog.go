@@ -134,7 +134,7 @@ func (h *SLogHandler) Handle(ctx context.Context, record slog.Record) error {
 	}
 
 	c := h.logger.WithLevel(convertSLogLevelToZLog(record.Level)).Ctx(ctx).CallerSkipFrame(defaultSkipFrameCount)
-	if !h.noTimestamp {
+	if !h.noTimestamp && !record.Time.IsZero() {
 		c.Time(zerolog.TimestampFieldName, record.Time)
 	}
 	c.Fields(attributes).Msg(record.Message)
