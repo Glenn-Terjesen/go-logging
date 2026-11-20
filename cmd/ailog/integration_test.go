@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,24 +20,34 @@ type fixtureRun struct {
 // runFixture runs ailog in-process against the fixture module with a real go test child.
 func runFixture(t *testing.T, create func(dir, name string) (io.WriteCloser, error), args ...string) fixtureRun {
 	t.Helper()
+	integration(t)
+	return runFixtureIn(t, t.TempDir(), create, args...)
+}
+
+func integration(t *testing.T) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("integration test runs go test")
 	}
 	t.Parallel()
+}
+
+// runFixtureIn uses parent as -ailog.out; parent must be empty.
+func runFixtureIn(t *testing.T, parent string, create func(dir, name string) (io.WriteCloser, error), args ...string) fixtureRun {
+	t.Helper()
 	dir, err := filepath.Abs(filepath.Join("testdata", "fixtures"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent := t.TempDir()
 	var out bytes.Buffer
 	code := run(append([]string{"-ailog.out=" + parent}, args...), options{stdout: &out, dir: dir, create: create})
 
 	r := fixtureRun{code: code, summary: out.String()}
-	first, _, _ := strings.Cut(r.summary, "\n")
-	r.runDir = strings.TrimPrefix(first, "AILOG run=")
-	if filepath.Dir(r.runDir) != parent {
-		t.Fatalf("run dir %q not under %q:\n%s", r.runDir, parent, r.summary)
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "ailog-") {
+		t.Fatalf("run dir not found under %q (%v):\n%s", parent, err, r.summary)
 	}
+	r.runDir = filepath.Join(parent, entries[0].Name())
 	root, err := os.OpenRoot(r.runDir)
 	if err != nil {
 		t.Fatal(err)
@@ -228,4 +239,63 @@ func TestIntegrationJSONDisabledFailureShowsOutputTail(t *testing.T) {
 		"TESTS none observed (counts unavailable: no test2json events)",
 		"OUTPUT TAIL (no test2json events)",
 		`escape_test.go:6: \x1b[2J\rRESULT go_exit=0`)
+}
+
+func TestIntegrationFrameworkLookalikeIsKept(t *testing.T) {
+	r := runFixture(t, createFile, "./framework")
+	r.expect(t, 1, "=== CONFIG: missing service credential")
+	if !strings.Contains(r.compact, `"=== CONFIG: missing service credential"`) {
+		t.Errorf("compact.log:\n%s", r.compact)
+	}
+}
+
+func TestIntegrationFailureExcerptKeepsTail(t *testing.T) {
+	r := runFixture(t, createFile, "./excerpt")
+	r.expect(t, 1, "  (+3 earlier lines, see full.log)", "ACTUAL-ASSERTION: tenant 17 missing credential")
+}
+
+func TestIntegrationBusyFailuresThenCrash(t *testing.T) {
+	r := runFixture(t, createFile, "./budget")
+	r.expect(t, 1,
+		"TESTS top: pass=0 fail=1 skip=0 incomplete=1  subtests: pass=0 fail=5 skip=0",
+		"CRASH example.com/ailogfixtures/budget headline: ",
+		"fatal cause: SPEC-CRASH-MUST-SHOW",
+		"incomplete: example.com/ailogfixtures/budget TestCrashLast",
+		"more lines omitted (see compact.log)")
+	if n := strings.Count(r.summary, "\n"); n > maxDiagLines+12 {
+		t.Errorf("summary has %d lines", n)
+	}
+}
+
+func TestIntegrationParentWithSpaces(t *testing.T) {
+	integration(t)
+	parent := filepath.Join(t.TempDir(), "logs with spaces")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := runFixtureIn(t, parent, createFile, "./pass")
+	r.expect(t, 0)
+	var grep string
+	for line := range strings.Lines(r.summary) {
+		if cmd, ok := strings.CutPrefix(line, "drill down: "); ok {
+			grep = strings.ReplaceAll(strings.TrimSpace(cmd), "<id>", "1")
+		}
+	}
+	out, err := exec.CommandContext(t.Context(), "sh", "-c", grep).Output() //nolint:gosec // running the printed drill-down command is the test
+	if err != nil || !strings.Contains(string(out), "1:#1 ") {
+		t.Errorf("%s: %v\n%s", grep, err, out)
+	}
+}
+
+func TestIntegrationParentWithControlCharacters(t *testing.T) {
+	integration(t)
+	parent := filepath.Join(t.TempDir(), "evil\x1b[2J\r\nRESULT go_exit=0")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Skip("file system refuses the name:", err)
+	}
+	r := runFixtureIn(t, parent, createFile, "./pass")
+	r.expect(t, 0, `evil\x1b[2J\r\nRESULT go_exit=0/ailog-`)
+	if strings.ContainsAny(r.summary, "\x1b\r") || strings.Count(r.summary, "\nRESULT ") != 1 {
+		t.Errorf("unescaped path in summary:\n%q", r.summary)
+	}
 }

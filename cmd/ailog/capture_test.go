@@ -191,7 +191,7 @@ func TestDedupe(t *testing.T) {
 	if n := strings.Count(tc.full.String(), "\n"); n != 8 {
 		t.Errorf("full.log has %d lines, want every occurrence (8)", n)
 	}
-	if !strings.Contains(summary, "#1 total=5 WRN p ?TestR") {
+	if !strings.Contains(summary, "  #1 total=5 ?TestR (shown above)\n") {
 		t.Errorf("summary lacks repeat total:\n%s", summary)
 	}
 }
@@ -211,6 +211,8 @@ func TestRenderEvent(t *testing.T) {
 			`ERR p ?T msg="m" stack="A a.go:1 > B /x/b.go:2 [+1 frames] | D d.go:4 [+2 groups]"`},
 		{"unknown stack shape", `{"severity":"error","message":"m","stack":"plain"}`,
 			`ERR p ?T msg="m" stack="plain"`},
+		{"null is not an empty string", `{"severity":"warning","message":null,"expected":null,"actual":"","nested":{"v":null}}`,
+			`WRN p ?T msg=null actual="" expected=null nested={"v":null}`},
 		{"unknown level", `{"severity":"notice","message":"m","odd key":true}`,
 			`NOTICE p ?T msg="m" "odd key"=true`},
 	}
@@ -277,7 +279,7 @@ func TestSummaryGlobalCaps(t *testing.T) {
 	if len(summary) > 30_000 || len(out) > maxDiagLines+8 {
 		t.Errorf("summary is %d bytes, %d lines", len(summary), len(out))
 	}
-	if !strings.Contains(summary, `\x1b[2J\rRESULT go_exit=0`) || !strings.Contains(summary, "more lines omitted (see compact.log)") {
+	if !strings.Contains(summary, "more lines omitted (see compact.log)") {
 		t.Errorf("summary:\n%s", summary)
 	}
 	if !strings.HasPrefix(summary, "RESULT go_exit=1 ") || strings.Contains(summary, "\nRESULT go_exit=0") {
@@ -347,5 +349,55 @@ func TestClip(t *testing.T) {
 	}
 	if got := escapeText("a\tb\xffc\u2028"); got != `a\tb\xffc\u2028` {
 		t.Errorf("escapeText = %q", got)
+	}
+}
+
+func TestIsFramework(t *testing.T) {
+	for _, line := range []string{"=== RUN   TestA", "    === NAME  TestA/b", "=== PAUSE TestA", "=== CONT  TestA",
+		"--- PASS: TestA (0.00s)", "    --- FAIL: TestA/b (0.00s)", "--- SKIP: TestA (0.00s)", "PASS", "FAIL",
+		"ok  \tpkg\t0.1s", "FAIL\tpkg\t0.1s", "?   \tpkg\t[no test files]"} {
+		if !isFramework(line) {
+			t.Errorf("%q not recognised", line)
+		}
+	}
+	for _, line := range []string{"=== CONFIG: missing service credential", "--- PASSWORD rotated", "PASS: fine", "ok then", "===", "FAILED"} {
+		if isFramework(line) {
+			t.Errorf("%q treated as a framework line", line)
+		}
+	}
+}
+
+func TestCandidatesBoundedAndShownAbove(t *testing.T) {
+	var b strings.Builder
+	body := strings.Repeat("b", 128<<10)
+	for p := range 3 {
+		pkg := fmt.Sprintf("pkg%d", p)
+		b.WriteString(ev("run", pkg, "TestPass", ""))
+		b.WriteString(ev("output", pkg, "TestPass", warn("from passing test")))
+		b.WriteString(ev("pass", pkg, "TestPass", ""))
+		b.WriteString(ev("run", pkg, "TestFail", ""))
+		for w := range 8 {
+			b.WriteString(ev("output", pkg, "TestFail", warn(fmt.Sprint("big ", w), `"body":"`+body+`"`)))
+		}
+		b.WriteString(ev("fail", pkg, "TestFail", "") + ev("fail", pkg, "", ""))
+	}
+	tc := newTestCapture(t, "")
+	summary := tc.feed(t, b.String())
+
+	for _, p := range tc.failing {
+		for _, cd := range p.cands {
+			if n := utf8.RuneCountInString(cd.text); n > maxEntry {
+				t.Fatalf("%s candidate #%d keeps %d chars", p.name, cd.id, n)
+			}
+		}
+	}
+	for _, want := range []string{
+		"FAIL pkg0 TestFail",
+		"  #1 total=1 WRN pkg0 ?TestPass msg=\"from passing test\"",
+		"  #2 total=1 ?TestFail (shown above)",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary lacks %q:\n%s", want, summary)
+		}
 	}
 }

@@ -6,7 +6,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -57,7 +56,7 @@ func run(args []string, opts options) int {
 	}
 
 	argv := append([]string{"test", "-json", "-count=1"}, userArgs...)
-	say(opts.stdout, "AILOG run=%s\ncmd: go %s\n", runDir, shellJoin(argv))
+	say(opts.stdout, "AILOG run=%s\ncmd: go %s\n", escapeText(runDir), escapeText(shellJoin(argv)))
 
 	failure := &latch{}
 	sinks := map[string]*sink{}
@@ -93,8 +92,9 @@ func finish(cmd *exec.Cmd, stdout, stderr io.Reader, sinks map[string]*sink, fai
 	head := &headLines{limit: stderrLines}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		if _, err := io.Copy(io.MultiWriter(sinks[stderrFile], head), stderr); err != nil {
+		if err := frameLines(stderr, sinks[stderrFile].write, maxSummaryLine, head.add); err != nil {
 			failure.set(fmt.Errorf("read stderr: %w", err))
+			_, _ = io.Copy(io.Discard, stderr) // keep the child from blocking on a full pipe
 		}
 	})
 
@@ -104,7 +104,6 @@ func finish(cmd *exec.Cmd, stdout, stderr io.Reader, sinks map[string]*sink, fai
 		_, _ = io.Copy(io.Discard, stdout) // keep the child from blocking on a full pipe
 	}
 	wg.Wait()
-	head.close()
 
 	goExit := 0
 	if err := cmd.Wait(); err != nil {
@@ -156,17 +155,9 @@ func parseArgs(args []string) (parent string, rest []string, err error) {
 	return parent, rest, nil
 }
 
+// createFile creates one of the fixed file names in the new private run dir; O_EXCL refuses existing files and symlinks.
 func createFile(dir, name string) (io.WriteCloser, error) {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
-	if closeErr := root.Close(); err == nil && closeErr != nil {
-		_ = f.Close()
-		return nil, closeErr
-	}
-	return f, err
+	return os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm) //nolint:gosec // fixed names inside a dir we just created
 }
 
 func cwdPrefix(dir string) string {
@@ -187,12 +178,17 @@ func cwdPrefix(dir string) string {
 func shellJoin(args []string) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
-		quoted[i] = arg
-		if arg == "" || strings.ContainsFunc(arg, needsShellQuote) {
-			quoted[i] = "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
-		}
+		quoted[i] = shellQuote(arg)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// shellQuote returns arg as one POSIX shell word, single-quoted unless it is plainly safe.
+func shellQuote(arg string) string {
+	if arg != "" && !strings.ContainsFunc(arg, needsShellQuote) {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
 func needsShellQuote(r rune) bool {
@@ -270,45 +266,16 @@ func closeSinks(sinks map[string]*sink) {
 	}
 }
 
-// headLines keeps the first few lines written to it, each bounded, and counts the rest.
+// headLines keeps the first few stderr lines (each already bounded) and counts all of them.
 type headLines struct {
-	limit   int
-	lines   []string
-	partial []byte
-	total   int
+	limit int
+	lines []string
+	total int
 }
 
-func (h *headLines) Write(p []byte) (int, error) {
-	n := len(p)
-	for len(p) > 0 {
-		i := bytes.IndexByte(p, '\n')
-		chunk := p
-		if i >= 0 {
-			chunk = p[:i]
-		}
-		if room := maxSummaryLine - len(h.partial); len(h.lines) < h.limit && room > 0 {
-			h.partial = append(h.partial, chunk[:min(room, len(chunk))]...)
-		}
-		if i < 0 {
-			break
-		}
-		h.endLine()
-		p = p[i+1:]
-	}
-	return n, nil
-}
-
-func (h *headLines) endLine() {
+func (h *headLines) add(line []byte, _ bool) {
 	if len(h.lines) < h.limit {
-		h.lines = append(h.lines, string(h.partial))
+		h.lines = append(h.lines, string(line))
 	}
-	h.partial = h.partial[:0]
 	h.total++
-}
-
-// close counts an unterminated last line.
-func (h *headLines) close() {
-	if len(h.partial) > 0 {
-		h.endLine()
-	}
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -69,14 +70,23 @@ type logical struct {
 type tally struct{ pass, fail, skip, incomplete int }
 
 type testBlock struct {
-	pkg, name     string
-	first, last   int
-	lines, events []string
+	pkg, name   string
+	first, last int
+	lines       []string // the last maxBlockLines non-log lines
+	dropped     int      // earlier non-log lines not kept
+	events      []ref
+}
+
+// ref is a bounded summary entry for one logical line.
+type ref struct {
+	id   int
+	text string
 }
 
 type candidate struct {
-	id, total int
-	text      string
+	ref
+	total int
+	hint  string
 }
 
 type pkgState struct {
@@ -134,15 +144,25 @@ func newCapture(raw, full, compact *sink, cwd string) *capture {
 
 // consume tees r into the raw file and processes it one newline-framed record at a time.
 func (c *capture) consume(r io.Reader) error {
+	return frameLines(r, c.raw.write, maxRecord, func(rec []byte, oversized bool) {
+		c.rawLine++
+		c.record(rec, oversized)
+	})
+}
+
+// frameLines passes every byte of r to tee and each newline-terminated record (or final
+// unterminated one), without its newline and bounded to limit bytes, to emit.
+func frameLines(r io.Reader, tee func([]byte), limit int, emit func(rec []byte, cut bool)) error {
 	br := bufio.NewReaderSize(r, readBufSize)
-	rec := make([]byte, 0, readBufSize)
-	pending, oversized := false, false
+	rec := make([]byte, 0, min(limit, readBufSize))
+	pending, cut := false, false
 	for {
 		chunk, err := br.ReadSlice('\n')
-		c.raw.write(chunk)
+		tee(chunk)
 		pending = pending || len(chunk) > 0
-		if room := maxRecord - len(rec); len(chunk) > room {
-			oversized = true
+		chunk = bytes.TrimSuffix(chunk, []byte("\n"))
+		if room := limit - len(rec); len(chunk) > room {
+			cut = true
 			chunk = chunk[:room]
 		}
 		rec = append(rec, chunk...)
@@ -150,10 +170,9 @@ func (c *capture) consume(r io.Reader) error {
 			continue
 		}
 		if pending {
-			c.rawLine++
-			c.record(bytes.TrimSuffix(rec, []byte("\n")), oversized)
+			emit(rec, cut)
 		}
-		rec, pending, oversized = rec[:0], false, false
+		rec, pending, cut = rec[:0], false, false
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -291,7 +310,7 @@ func (c *capture) line(l logical) {
 	if ev != nil {
 		body = ev.render(l.pkg, hint, c.cwd)
 	} else {
-		body = fmt.Sprintf("TXT %s ?%s%s %s", l.pkg, hint, l.mark, quote(text))
+		body = fmt.Sprintf("TXT %s ?%s%s %s", l.pkg, hint, l.mark, strconv.Quote(text))
 	}
 
 	if r := c.repeats[l.key]; ev != nil && r != nil && r.key == ev.key && r.hint == hint {
@@ -332,8 +351,12 @@ func (c *capture) track(p *pkgState, l logical, id int, ev *logEvent, body strin
 			return
 		}
 		e := entry(id, escapeText(strings.TrimPrefix(l.mark+" ", " ")+text))
-		if b != nil && len(b.lines) < maxBlockLines {
+		if b != nil {
 			b.lines = append(b.lines, e)
+			if len(b.lines) > maxBlockLines {
+				b.lines = b.lines[1:]
+				b.dropped++
+			}
 		}
 		p.tail = append(p.tail, e)
 		if len(p.tail) > maxTailLines {
@@ -354,13 +377,14 @@ func (c *capture) track(p *pkgState, l logical, id int, ev *logEvent, body strin
 		return
 	}
 	if b != nil && !ev.repeated && len(b.events) < maxBlockLines {
-		b.events = append(b.events, e)
+		b.events = append(b.events, ref{id: id, text: e})
 	}
 	switch cd := p.candIndex[ev.key]; {
 	case cd != nil:
 		cd.total++
 	case len(p.cands) < maxCandidates:
-		cd = &candidate{id: id, total: 1, text: body}
+		// Identity is the full event (ev.key); only a bounded display text is kept.
+		cd = &candidate{ref: ref{id: id, text: clip(body, maxEntry)}, total: 1, hint: cmp.Or(l.test, "-")}
 		p.cands = append(p.cands, cd)
 		p.candIndex[ev.key] = cd
 	default:
@@ -483,7 +507,7 @@ func (c *capture) noteLossy(start, end int) {
 // isFramework reports lines printed by the testing package or go test itself.
 func isFramework(text string) bool {
 	trimmed := strings.TrimLeft(text, " ")
-	for _, prefix := range []string{"=== ", "--- PASS", "--- FAIL", "--- SKIP"} {
+	for _, prefix := range []string{"=== RUN ", "=== PAUSE ", "=== CONT ", "=== NAME ", "--- PASS: ", "--- FAIL: ", "--- SKIP: "} {
 		if strings.HasPrefix(trimmed, prefix) {
 			return true
 		}

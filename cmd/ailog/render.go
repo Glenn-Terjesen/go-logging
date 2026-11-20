@@ -157,12 +157,12 @@ func firstKey(fields map[string]json.RawMessage, keys ...string) string {
 // jsonValue renders strings quoted and everything else as minified JSON, keeping numbers exact.
 func jsonValue(raw json.RawMessage) string {
 	var s string
-	if json.Unmarshal(raw, &s) == nil {
+	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte(`"`)) && json.Unmarshal(raw, &s) == nil {
 		return strconv.Quote(s)
 	}
 	var buf bytes.Buffer
 	if json.Compact(&buf, raw) != nil {
-		return quote(string(raw))
+		return strconv.Quote(string(raw))
 	}
 	return escapeText(buf.String())
 }
@@ -183,10 +183,6 @@ func bare(s string) string {
 		return strconv.Quote(s)
 	}
 	return s
-}
-
-func quote(s string) string {
-	return strconv.Quote(s)
 }
 
 // escapeText escapes control characters, other non-printable runes and invalid UTF-8.
